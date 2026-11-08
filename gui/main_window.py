@@ -26,6 +26,7 @@ from core.printer import (
     FILAMENT_DIAMETER,
     PRINTER_NAME,
     estimate_filament,
+    estimate_print_time,
     printer_warnings,
 )
 from core.text_mesh import DEFAULT_FONT, TextMeshError, make_nameplate, make_text_mesh
@@ -196,10 +197,12 @@ def build_meshes(kind: str, params: dict) -> BuildResult:
 
 
 def filament_text(mesh: trimesh.Trimesh, infill_percent: float) -> str:
-    """フィラメントの使用量の目安を、画面に出す文章にする。"""
+    """フィラメントの使用量と印刷時間の目安を、画面に出す文章にする。"""
     est = estimate_filament(mesh, infill=infill_percent / 100.0)
-    return (f"フィラメント 約 {est.length_m:.2f} m（{est.weight_g:.1f} g・"
-            f"インフィル {infill_percent:g}%・{FILAMENT_DIAMETER} mm PLA の目安）")
+    time = estimate_print_time(mesh, infill=infill_percent / 100.0)
+    how = f"立てて積層 {time.layer_height:g} mm" if time.standing else f"積層 {time.layer_height:g} mm"
+    return (f"フィラメント 約 {est.length_m:.2f} m（{est.weight_g:.1f} g）／ 印刷時間 {time.text}"
+            f"（インフィル {infill_percent:g}%・{how}・{FILAMENT_DIAMETER} mm PLA の目安）")
 
 
 # ---------------------------------------------------------------------------
