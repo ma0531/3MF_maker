@@ -106,3 +106,56 @@ def test_filament_increases_with_infill():
 def test_filament_invalid_infill(infill):
     with pytest.raises(ValueError, match="インフィル"):
         estimate_filament(_box(10, 10, 10), infill=infill)
+
+
+# ---- 印刷時間の見積もり ----
+
+from core.printer import (  # noqa: E402
+    DEFAULT_LAYER_HEIGHT,
+    INFILL_FLOW,
+    LAYER_OVERHEAD,
+    START_OVERHEAD,
+    WALL_FLOW,
+    estimate_print_time,
+    format_duration,
+)
+
+
+def test_print_time_formula():
+    """20mm の立方体（インフィル 15%）: 準備 + 外側 1920/8 + 内側 912/15 + 100 層 x 3 秒。"""
+    est = estimate_print_time(_box(20, 20, 20), infill=0.15)
+    expected = START_OVERHEAD + 1920 / WALL_FLOW + (8000 - 1920) * 0.15 / INFILL_FLOW + 100 * LAYER_OVERHEAD
+    assert est.seconds == pytest.approx(expected)
+    assert est.layers == 100 and est.layer_height == DEFAULT_LAYER_HEIGHT
+    assert not est.standing
+    assert 10 * 60 < est.seconds < 20 * 60  # 13 分ほど
+
+
+def test_print_time_increases():
+    small = estimate_print_time(_box(20, 20, 10))
+    tall = estimate_print_time(_box(20, 20, 40))
+    dense = estimate_print_time(_box(20, 20, 10), infill=1.0)
+    assert tall.seconds > small.seconds and dense.seconds > small.seconds
+
+
+def test_print_time_lithophane_standing():
+    """リトファンは立てて 0.12mm で積む前提（縦 50mm → 約 417 層）。"""
+    mesh = make_lithophane(np.zeros((50, 100)), width=100, resolution=0.5)
+    est = estimate_print_time(mesh, infill=1.0)
+    assert est.standing and est.layer_height == 0.12
+    assert est.layers == int(np.ceil(50 / 0.12))
+
+
+def test_print_time_invalid():
+    with pytest.raises(ValueError, match="積層ピッチ"):
+        estimate_print_time(_box(10, 10, 10), layer_height=0)
+    with pytest.raises(ValueError, match="インフィル"):
+        estimate_print_time(_box(10, 10, 10), infill=2)
+
+
+@pytest.mark.parametrize("seconds, text", [
+    (60, "約 5分"), (25 * 60, "約 25分"), (60 * 60, "約 1時間"),
+    (80 * 60, "約 1時間 20分"), (151 * 60, "約 2時間 30分"),
+])
+def test_format_duration(seconds, text):
+    assert format_duration(seconds) == text
