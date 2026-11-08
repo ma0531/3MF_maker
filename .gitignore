@@ -1,0 +1,15 @@
+# Python の仮想環境・キャッシュ
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# 生成したファイル（フォルダ自体は .gitkeep で残す）
+output/*
+!output/.gitkeep
+
+# エディタ・OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini

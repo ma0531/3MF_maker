@@ -1,0 +1,11 @@
+trimesh
+numpy
+Pillow
+opencv-python
+shapely
+manifold3d
+matplotlib
+pytest
+# 3MF の書き出しに trimesh が使う追加ライブラリ
+lxml
+networkx
