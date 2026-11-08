@@ -48,6 +48,8 @@ FORMATS = ("STL", "OBJ", "3MF", "AMF")
 ALIGN_CHOICES = {"中央": "center", "行頭（左・上）": "left", "行末（右・下）": "right"}
 DIRECTION_CHOICES = {"横書き": "horizontal", "縦書き": "vertical"}
 STYLE_CHOICES = {"浮き出し": "raised", "彫り込み": "engraved"}
+# 切り抜きの欄（core の引数名の後半, 画面の表示）
+CROP_SIDES = (("left", "左"), ("top", "上"), ("right", "右"), ("bottom", "下"))
 
 # フィラメント見積もり用のインフィルの初期値（%）
 DEFAULT_INFILL = {"text": 15, "nameplate": 15, "relief": 15, "lithophane": 100}
@@ -79,7 +81,7 @@ class Field:
     key: str          # core の関数の引数名
     label: str        # 画面に出す名前
     default: object   # 初期値
-    kind: str = "float"  # float / optional（空欄=自動）/ text / font / image / choice / bool
+    kind: str = "float"  # float / optional（空欄=自動）/ text / font / image / choice / bool / crop
     unit: str = "mm"
     choices: dict | None = None  # kind="choice" のときの選択肢（表示 → 値）
 
@@ -116,6 +118,11 @@ FIELDS: dict[str, list[Field]] = {
         Field("max_height", "最大高さ", 5.0),
         Field("invert", "反転（暗い所を高く）", False, "bool", unit=""),
         Field("resolution", "解像度", 0.2, unit="mm/画素"),
+        Field("auto_levels", "自動補正（明暗をはっきり）", False, "bool", unit=""),
+        Field("brightness", "明るさ", 0.0, unit="%（-100〜100）"),
+        Field("contrast", "コントラスト", 100.0, unit="%（100=そのまま）"),
+        Field("blur", "ぼかし", 0.0, unit="mm（ざらつきを減らす）"),
+        Field("crop", "切り抜き", 0.0, "crop", unit="%"),
     ],
     "lithophane": [
         Field("image", "画像", "", "image"),
@@ -123,6 +130,11 @@ FIELDS: dict[str, list[Field]] = {
         Field("min_thickness", "最小厚み", 0.8),
         Field("max_thickness", "最大厚み", 3.0),
         Field("resolution", "解像度", 0.2, unit="mm/画素"),
+        Field("auto_levels", "自動補正（明暗をはっきり）", False, "bool", unit=""),
+        Field("brightness", "明るさ", 0.0, unit="%（-100〜100）"),
+        Field("contrast", "コントラスト", 100.0, unit="%（100=そのまま）"),
+        Field("blur", "ぼかし", 0.0, unit="mm（ざらつきを減らす）"),
+        Field("crop", "切り抜き", 0.0, "crop", unit="%"),
     ],
 }
 
@@ -358,6 +370,19 @@ class MainWindow:
                 ttk.Checkbutton(frame, variable=var, command=self.schedule_preview).grid(
                     row=row, column=1, sticky="w", pady=2)
                 values[f.key] = var
+            elif f.kind == "crop":
+                # 切り抜き: 左・上・右・下の 4 つを 1 行にまとめる
+                row_frame = ttk.Frame(frame)
+                row_frame.grid(row=row, column=1, columnspan=2, sticky="w", pady=2)
+                crop_vars = {}
+                for side, label in CROP_SIDES:
+                    ttk.Label(row_frame, text=label).pack(side="left")
+                    var = tk.StringVar(value=str(f.default))
+                    ttk.Entry(row_frame, textvariable=var, width=4).pack(side="left", padx=(1, 5))
+                    var.trace_add("write", lambda *_: self.schedule_preview())
+                    crop_vars[side] = var
+                ttk.Label(row_frame, text=f.unit, foreground="#555").pack(side="left")
+                values[f.key] = crop_vars
             else:  # float / optional
                 var = tk.StringVar(value=str(f.default))
                 ttk.Entry(frame, textvariable=var, width=10).grid(row=row, column=1, sticky="w", pady=2)
@@ -444,6 +469,11 @@ class MainWindow:
                 params[f.key] = bool(source.get())
             elif f.kind in ("font", "image"):
                 params[f.key] = source.get().strip()
+            elif f.kind == "crop":
+                # 切り抜きは core の crop_left・crop_top・crop_right・crop_bottom に分けて渡す
+                for side, label in CROP_SIDES:
+                    side_field = Field(f"crop_{side}", f"切り抜き（{label}）", 0.0)
+                    params[f"crop_{side}"] = _parse_number(source[side].get(), side_field)
             else:
                 params[f.key] = _parse_number(source.get(), f)
         params["holes"] = tuple(self.holes[kind])

@@ -87,7 +87,13 @@ def test_fields_match_core_arguments():
              "relief": make_relief, "lithophane": make_lithophane}
     for kind, func in funcs.items():
         names = set(inspect.signature(func).parameters)
-        assert {f.key for f in FIELDS[kind]} <= names, kind
+        keys = set()
+        for f in FIELDS[kind]:
+            if f.kind == "crop":  # 切り抜きは 4 つの引数に分かれる
+                keys |= {"crop_left", "crop_top", "crop_right", "crop_bottom"}
+            else:
+                keys.add(f.key)
+        assert keys <= names, kind
 
 
 # ---- 画面 ----
@@ -435,3 +441,27 @@ def _send_drop_message(hwnd, paths, post=True):
     # 受け取った側が DragFinish で片付ける（メモリを解放する）
     send = user32.PostMessageW if post else user32.SendMessageW
     assert send(hwnd, 0x0233, handle, 0)
+
+
+# ---- 画像の調整 ----
+
+def test_window_image_adjust(window, gradient_png):
+    window.image_var.set(gradient_png)
+    _select(window, "lithophane")
+    inp = window.inputs["lithophane"]
+    inp["crop"]["left"].set("10")
+    inp["crop"]["bottom"].set("20")
+    inp["brightness"].set("15")
+    inp["auto_levels"].set(True)
+    params = window.collect_params("lithophane")
+    assert (params["crop_left"], params["crop_top"], params["crop_right"], params["crop_bottom"]) \
+        == (10, 0, 0, 20)
+    assert params["brightness"] == 15 and params["auto_levels"] is True
+    window.refresh_preview()
+    _wait(window, lambda: window.busy == 0 and window.result is not None
+          and window.result.params.get("crop_left") == 10)
+    assert window.result.mesh.is_watertight
+
+    inp["crop"]["right"].set("abc")
+    window.refresh_preview()
+    assert "切り抜き（右）" in window.status_var.get()
