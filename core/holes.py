@@ -111,9 +111,15 @@ def add_holes(mesh: trimesh.Trimesh, holes: Iterable[Hole | tuple]) -> trimesh.T
         if cut_volume <= EMPTY_VOLUME:
             warnings.append(f"穴{i}の位置には何もないため、穴になっていません。")
         elif "base_thickness" in mesh.metadata:
-            # ネームプレート: 台座だけを削るなら「穴の断面積 x 台座の厚み」以下になる
-            area = cutter.volume() / cut_height
-            if cut_volume > area * mesh.metadata["base_thickness"] * 1.01 + EMPTY_VOLUME:
+            # ネームプレート: 文字にかからなければ、削る体積は「穴の断面積 x 台座の厚み」になる。
+            # 浮き出しで文字にかかると、文字の分だけ多く削る。
+            # 彫り込みで文字にかかると、すでに彫ってある分だけ少なく削る。
+            plate_volume = cutter.volume() / cut_height * mesh.metadata["base_thickness"]
+            if mesh.metadata.get("text_style") == "engraved":
+                on_text = cut_volume < plate_volume * 0.99 - EMPTY_VOLUME
+            else:
+                on_text = cut_volume > plate_volume * 1.01 + EMPTY_VOLUME
+            if on_text:
                 warnings.append(
                     f"穴{i}が文字にかかっていて、文字の一部が削れます。"
                     "文字にかからない位置にするか、余白を広げてください。"
