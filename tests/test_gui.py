@@ -465,3 +465,63 @@ def test_window_image_adjust(window, gradient_png):
     inp["crop"]["right"].set("abc")
     window.refresh_preview()
     assert "切り抜き（右）" in window.status_var.get()
+
+
+# ---- 完成図のクリックで穴の位置を決める ----
+
+class _Click:
+    """matplotlib がクリックのときに渡す情報のまね。"""
+    def __init__(self, ax, x, y, button=1):
+        self.inaxes, self.xdata, self.ydata, self.button = ax, x, y, button
+
+
+def test_click_sets_hole_position(window):
+    _select(window, "nameplate")
+    window.refresh_preview()
+    _wait(window, lambda: window.busy == 0 and window.result is not None
+          and window.result.kind == "nameplate")
+    window.view_var.set("top")
+    window._redraw()
+    ax = window.figure.axes[0]
+    window.hole_w_var.set("5")
+    window._on_canvas_click(_Click(ax, 6.26, 14.9))
+    assert (window.hole_x_var.get(), window.hole_y_var.get()) == ("6.5", "15")  # 0.5mm 単位
+    assert window.click_pos == (6.5, 15.0)
+    assert "「追加」" in window.status_var.get()
+    assert len(window.figure.axes[0].lines) == 2  # 赤い点線の輪郭が出ている
+
+    window.add_hole()
+    assert window.holes["nameplate"][-1].x == 6.5
+    assert window.click_pos is None  # 追加したら印は消える
+
+
+def test_click_ignored_in_3d_view(window):
+    window.view_var.set("shape")
+    window.hole_x_var.set("")
+    window._on_canvas_click(_Click(object(), 10, 10))
+    assert window.hole_x_var.get() == ""
+
+
+def test_click_outside_axes_or_right_button(window):
+    window.view_var.set("top")
+    window._on_canvas_click(_Click(None, 10, 10))
+    window._on_canvas_click(_Click(object(), 10, 10, button=3))
+    assert window.click_pos is None
+
+
+def test_click_on_backlit_view(window, gradient_png):
+    window.image_var.set(gradient_png)
+    _select(window, "lithophane")
+    window.refresh_preview()
+    _wait(window, lambda: window.busy == 0 and window.result is not None
+          and window.result.kind == "lithophane")
+    window.view_var.set("backlit")
+    window._redraw()
+    window._on_canvas_click(_Click(window.figure.axes[0], 50, 45))
+    assert window.click_pos == (50, 45)
+
+
+def test_backlit_falls_back_on_other_tabs(window):
+    """リトファン以外のタブでは「光を当てた見え方」は立体として表示する。"""
+    window.view_var.set("backlit")
+    assert window.current_view() == "shape"

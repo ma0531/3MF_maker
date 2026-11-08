@@ -14,6 +14,7 @@ import numpy as np
 import trimesh
 from matplotlib import font_manager
 from matplotlib.backends.backend_agg import FigureCanvasAgg
+from matplotlib.collections import PolyCollection
 from matplotlib.figure import Figure
 # ファイルパスの Path と名前がぶつからないよう MplPath と呼ぶ
 from matplotlib.path import Path as MplPath
@@ -177,7 +178,7 @@ def backlit_image(mesh: trimesh.Trimesh, holes=()) -> np.ndarray:
     return rgb
 
 
-def draw_backlit(fig: Figure, mesh: trimesh.Trimesh, title: str = "", holes=()) -> None:
+def draw_backlit(fig: Figure, mesh: trimesh.Trimesh, title: str = "", holes=(), marker=None) -> None:
     """リトファンに後ろから光を当てたときの見え方を、2D の画像で描く。
 
     光は厚みに応じて指数的に弱くなる（厚い＝暗い）として簡易的に計算する。
@@ -190,6 +191,7 @@ def draw_backlit(fig: Figure, mesh: trimesh.Trimesh, title: str = "", holes=()) 
     # 表の 0 行目が画像の上（奥 = +Y）なので origin="upper" で描く
     ax.imshow(rgb, extent=(0, width, 0, depth), origin="upper", interpolation="bilinear")
     ax.set_facecolor("black")
+    _draw_marker(ax, marker)
     ax.set_xlabel("X (mm)")
     ax.set_ylabel("Y (mm)")
     ax.tick_params(labelsize=7)
@@ -198,16 +200,76 @@ def draw_backlit(fig: Figure, mesh: trimesh.Trimesh, title: str = "", holes=()) 
     fig.tight_layout()
 
 
+def draw_top(
+    fig: Figure,
+    mesh: trimesh.Trimesh,
+    title: str = "",
+    size: np.ndarray | None = None,
+    marker: np.ndarray | None = None,
+) -> None:
+    """真上から見た図（平面図）を描く。高い所ほど明るい色にする。
+
+    座標は mm で、クリックした位置をそのまま穴の位置に使える。
+    marker（輪郭の点列, mm）を渡すと、赤い点線で重ねて描く（クリックした穴の位置の確認用）。
+    """
+    fig.clear()
+    ax = fig.add_subplot()
+    lo, hi = mesh.bounds
+
+    # 上を向いている面だけを、低い順に描く（高い面が上に重なるように）
+    normals = mesh.face_normals
+    up = normals[:, 2] > 0.3
+    tris = mesh.vertices[mesh.faces[up]]
+    heights = tris[:, :, 2].mean(axis=1)
+    order = np.argsort(heights)
+    tris, heights = tris[order], heights[order]
+
+    span = max(hi[2] - lo[2], 1e-6)
+    level = (heights - lo[2]) / span  # 0 = 一番低い, 1 = 一番高い
+    colors = np.clip(BASE_COLOR[None, :] * (0.45 + 0.55 * level[:, None]) + 0.1 * level[:, None], 0, 1)
+    ax.add_collection(PolyCollection(tris[:, :, :2], facecolors=colors, edgecolors=colors,
+                                     linewidths=0.3))
+
+    _draw_marker(ax, marker)
+    margin = 0.03 * max(hi[0] - lo[0], hi[1] - lo[1])
+    ax.set_xlim(lo[0] - margin, hi[0] + margin)
+    ax.set_ylim(lo[1] - margin, hi[1] + margin)
+    ax.set_aspect("equal")
+    ax.set_facecolor("#f4f4f4")
+    ax.set_axisbelow(True)  # 目盛りの線は形の下に描く
+    ax.grid(True, color="#cccccc", linewidth=0.5)
+    ax.set_xlabel("X (mm)")
+    ax.set_ylabel("Y (mm)")
+    ax.tick_params(labelsize=7)
+
+    sx, sy, sz = (hi - lo) if size is None else size
+    size_text = f"{sx:.1f} x {sy:.1f} x {sz:.1f} mm（真上から・クリックで穴の位置）"
+    ax.set_title(f"{title}\n{size_text}" if title else size_text, fontsize=10)
+    fig.tight_layout()
+
+
+def _draw_marker(ax, marker: np.ndarray | None) -> None:
+    """クリックした穴の位置を、赤い点線の輪郭で描く。"""
+    if marker is None or len(marker) < 2:
+        return
+    closed = np.vstack([marker, marker[:1]])
+    ax.plot(closed[:, 0], closed[:, 1], linestyle="--", color="#d32f2f", linewidth=1.5)
+    center = marker.mean(axis=0)
+    ax.plot([center[0]], [center[1]], marker="+", color="#d32f2f", markersize=10)
+
+
 def save_preview_png(
     mesh: trimesh.Trimesh,
     path: str | Path,
     title: str = "",
     size_inch: tuple[float, float] = (6, 5),
     backlit: bool = False,
+    top: bool = False,
 ) -> Path:
     """完成図を PNG に保存する（画面なしで動く）。
 
     backlit=True なら、リトファンに光を当てたときの見え方を描く。
+    top=True なら、真上から見た図を描く。
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -215,6 +277,8 @@ def save_preview_png(
     FigureCanvasAgg(fig)
     if backlit:
         draw_backlit(fig, mesh, title)
+    elif top:
+        draw_top(fig, mesh, title)
     else:
         draw_mesh(fig, mesh, title)
     fig.savefig(path)
