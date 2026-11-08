@@ -19,7 +19,7 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 
 from core.exporter import ExportError, export_mesh
-from core.holes import SHAPE_LABELS, Hole, HoleError, add_holes
+from core.holes import SHAPE_LABELS, Hole, HoleError, add_holes, hole_outline
 from core.image_mesh import ImageMeshError, make_lithophane, make_relief
 from core.printer import (
     BED_SIZE,
@@ -31,7 +31,7 @@ from core.printer import (
 )
 from core.text_mesh import DEFAULT_FONT, TextMeshError, make_nameplate, make_text_mesh
 from gui.dnd import enable_file_drop
-from gui.preview import draw_backlit, draw_mesh, preview_resolution
+from gui.preview import draw_backlit, draw_mesh, draw_top, preview_resolution
 
 # 保存先の初期フォルダ
 OUTPUT_DIR = Path(__file__).resolve().parent.parent / "output"
@@ -244,7 +244,8 @@ class MainWindow:
         self.hole_angle_var = tk.StringVar(value="0")
 
         self.format_var = tk.StringVar(value="3MF")
-        self.view_var = tk.StringVar(value="shape")  # shape / backlit（リトファン用）
+        self.view_var = tk.StringVar(value="shape")  # shape（立体）/ top（真上）/ backlit（リトファン用）
+        self.click_pos: tuple[float, float] | None = None  # 完成図でクリックした穴の位置
         self.status_var = tk.StringVar(value="")
         self.info_var = tk.StringVar(value="")
         self.filament_var = tk.StringVar(value="")
@@ -320,17 +321,23 @@ class MainWindow:
         ttk.Label(info, textvariable=self.info_var).pack(anchor="w")
         ttk.Label(info, textvariable=self.filament_var, foreground="#1a4f8b").pack(anchor="w")
         self.view_frame = ttk.Frame(header)
-        ttk.Radiobutton(self.view_frame, text="形", value="shape", variable=self.view_var,
+        self.view_frame.pack(side="right")
+        ttk.Radiobutton(self.view_frame, text="立体", value="shape", variable=self.view_var,
                         command=self._redraw).pack(side="left")
-        ttk.Radiobutton(self.view_frame, text="光を当てた見え方", value="backlit",
-                        variable=self.view_var, command=self._redraw).pack(side="left")
+        ttk.Radiobutton(self.view_frame, text="真上から", value="top", variable=self.view_var,
+                        command=self._redraw).pack(side="left")
+        # 「光を当てた見え方」はリトファンのときだけ出す
+        self.backlit_button = ttk.Radiobutton(self.view_frame, text="光を当てた見え方",
+                                              value="backlit", variable=self.view_var,
+                                              command=self._redraw)
 
         self.figure = Figure(figsize=(6, 5), dpi=100)
         self.canvas = FigureCanvasTkAgg(self.figure, master=right)
         self.canvas.get_tk_widget().pack(fill="both", expand=True)
-        ttk.Label(right, text=f"ドラッグで回転できます。{PRINTER_NAME}（造形サイズ "
-                              f"{BED_SIZE[0]:.0f} x {BED_SIZE[1]:.0f} x {BED_SIZE[2]:.0f} mm）"
-                              "を基準に確認しています。",
+        self.canvas.mpl_connect("button_press_event", self._on_canvas_click)
+        ttk.Label(right, text="立体: ドラッグで回転 ／ 真上から: クリックで穴の位置 ／ "
+                              f"基準: {PRINTER_NAME}（"
+                              f"{BED_SIZE[0]:.0f} x {BED_SIZE[1]:.0f} x {BED_SIZE[2]:.0f} mm）",
                   foreground="#555").pack(fill="x")
 
         self._sync_tab_widgets()
@@ -445,9 +452,8 @@ class MainWindow:
         scrollbar.pack(side="left", fill="y")
         self.hole_tree.bind("<<TreeviewSelect>>", lambda _e: self._on_hole_selected())
 
-        ttk.Label(box, text="位置は穴の中心（完成図の左下が 0, 0）。単位は mm・度。縦は空欄で自動。\n"
-                            "一覧で選ぶと値が入り、直して「更新」（Enter）で変更できます。\n"
-                            "六角形の幅は対辺の長さ（M3 ナットなら 5.5 + すき間 0.3 mm ほど）。",
+        ttk.Label(box, text="位置は穴の中心（左下が 0, 0）。一覧で選んで直し「更新」。縦は空欄で自動。\n"
+                            "真上からの図をクリックでも位置を入力。六角形の幅＝対辺（M3 ナットは 5.8）",
                   foreground="#555", justify="left").pack(anchor="w")
         self.update_hole_button.state(["disabled"])
 
@@ -515,6 +521,7 @@ class MainWindow:
         # 入力欄の値は残す（少し変えて続けて追加しやすいように）。
         # 追加後は何も選んでいない状態なので、Enter を押すと続けて「追加」になる
         self.holes[self.current_kind()].append(hole)
+        self.click_pos = None
         self._refresh_hole_list()
         self.schedule_preview(delay=0)
 
@@ -531,6 +538,7 @@ class MainWindow:
             return
         index = int(selected[0])
         self.holes[self.current_kind()][index] = hole
+        self.click_pos = None
         self._refresh_hole_list()
         self._select_hole(index)
         self.schedule_preview(delay=0)
@@ -556,6 +564,48 @@ class MainWindow:
         self.hole_w_var.set(f"{h.width:g}")
         self.hole_h_var.set("" if h.height is None else f"{h.height:g}")
         self.hole_angle_var.set(f"{h.angle:g}")
+
+    # ---- 完成図のクリックで穴の位置を決める ----
+
+    def current_view(self) -> str:
+        """今の表示（shape / top / backlit）。リトファン以外では backlit は立体として扱う。"""
+        view = self.view_var.get()
+        if view == "backlit" and self.current_kind() != "lithophane":
+            return "shape"
+        return view
+
+    def _on_canvas_click(self, event) -> None:
+        """真上から・光を当てた見え方の図をクリックしたら、その位置を穴の X・Y に入れる。
+
+        立体の表示では、ドラッグで回転するのでクリックは使わない。
+        """
+        if self.current_view() not in ("top", "backlit"):
+            return
+        if event.button != 1 or event.inaxes is None or event.xdata is None:
+            return
+        x = round(event.xdata * 2) / 2  # 0.5mm 単位にそろえる
+        y = round(event.ydata * 2) / 2
+        self.hole_x_var.set(f"{x:g}")
+        self.hole_y_var.set(f"{y:g}")
+        self.click_pos = (x, y)
+        # 描き直すと状態の表示が「問題は見つかりませんでした」などで上書きされるので、先に描き直す
+        self._redraw()
+        action = "「更新」" if len(self.hole_tree.selection()) == 1 else "「追加」"
+        self._show_status(
+            f"穴の位置を X={x:g}, Y={y:g} mm にしました（赤い点線）。{action}を押すと確定します。",
+            error=False,
+        )
+
+    def _marker_outline(self):
+        """クリックした位置に、今の入力欄の形・大きさで穴の輪郭を作る（確認の表示用）。"""
+        if self.click_pos is None:
+            return None
+        try:
+            hole = self.read_hole_inputs()
+        except InputError:
+            # 大きさなどが入っていなければ、2mm の四角を目印にする
+            hole = Hole(*self.click_pos, 2.0, shape="square")
+        return hole_outline(Hole(*self.click_pos, hole.width, hole.height, hole.shape, hole.angle))
 
     def _select_hole(self, index: int) -> None:
         iid = str(index)
@@ -618,8 +668,12 @@ class MainWindow:
             self.filament_var.set("")
             return
         title = KIND_LABELS[r.kind]
-        if r.kind == "lithophane" and self.view_var.get() == "backlit":
-            draw_backlit(self.figure, r.base_mesh, title, holes=r.holes)
+        view = self.current_view()
+        marker = self._marker_outline()
+        if view == "backlit":
+            draw_backlit(self.figure, r.base_mesh, title, holes=r.holes, marker=marker)
+        elif view == "top":
+            draw_top(self.figure, r.preview_mesh, title, size=r.mesh.extents, marker=marker)
         else:
             # 寸法は表示用（粗い）メッシュではなく、保存する本番のメッシュの値を出す
             draw_mesh(self.figure, r.preview_mesh, title, size=r.mesh.extents)
@@ -757,9 +811,10 @@ class MainWindow:
         kind = self.current_kind()
         # リトファンのときだけ「光を当てた見え方」を選べるようにする
         if kind == "lithophane":
-            self.view_frame.pack(side="right")
+            self.backlit_button.pack(side="left")
         else:
-            self.view_frame.pack_forget()
+            self.backlit_button.pack_forget()
+        self.click_pos = None  # 形が変わるので、クリックした位置の印は消す
         self.infill_entry.configure(textvariable=self.infill_vars[kind])
         self._refresh_hole_list()
 
