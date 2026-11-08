@@ -11,6 +11,7 @@
 """
 
 import math
+from dataclasses import dataclass
 from pathlib import Path
 
 import cv2
@@ -41,6 +42,14 @@ def make_relief(
     max_height: float = 5.0,
     invert: bool = False,
     resolution: float = DEFAULT_RESOLUTION,
+    brightness: float = 0.0,
+    contrast: float = 100.0,
+    blur: float = 0.0,
+    auto_levels: bool = False,
+    crop_left: float = 0.0,
+    crop_top: float = 0.0,
+    crop_right: float = 0.0,
+    crop_bottom: float = 0.0,
 ) -> trimesh.Trimesh:
     """画像の明るさを高さに変換したレリーフを作る（明るい＝高い）。
 
@@ -51,6 +60,7 @@ def make_relief(
         max_height: 一番明るい部分の高さ（mm）。
         invert: True なら反転（暗い＝高い）。
         resolution: 1 画素の大きさ（mm）。小さいほど細かいが重くなる。
+        brightness, contrast, blur, auto_levels, crop_*: 画像の調整（ImageAdjust を参照）。
 
     Returns:
         watertight な trimesh.Trimesh。
@@ -62,7 +72,9 @@ def make_relief(
             f"最大高さ（{max_height} mm）は最小高さ（{min_height} mm）より大きくしてください。"
         )
 
-    values = load_brightness(image, width, resolution)
+    adjust = ImageAdjust(brightness, contrast, blur, auto_levels,
+                         crop_left, crop_top, crop_right, crop_bottom)
+    values = load_brightness(image, width, resolution, adjust)
     if invert:
         values = 1.0 - values
     heights = min_height + values * (max_height - min_height)
@@ -77,6 +89,14 @@ def make_lithophane(
     min_thickness: float = 0.8,
     max_thickness: float = 3.0,
     resolution: float = DEFAULT_RESOLUTION,
+    brightness: float = 0.0,
+    contrast: float = 100.0,
+    blur: float = 0.0,
+    auto_levels: bool = False,
+    crop_left: float = 0.0,
+    crop_top: float = 0.0,
+    crop_right: float = 0.0,
+    crop_bottom: float = 0.0,
 ) -> trimesh.Trimesh:
     """光に透かして見るリトファンを作る（暗い＝厚い、明るい＝薄い）。
 
@@ -86,6 +106,7 @@ def make_lithophane(
         min_thickness: 一番明るい部分の厚み（mm）。
         max_thickness: 一番暗い部分の厚み（mm）。
         resolution: 1 画素の大きさ（mm）。
+        brightness, contrast, blur, auto_levels, crop_*: 画像の調整（ImageAdjust を参照）。
 
     Returns:
         watertight な trimesh.Trimesh。裏面（Z=0）は平ら。
@@ -97,7 +118,9 @@ def make_lithophane(
             f"最大厚み（{max_thickness} mm）は最小厚み（{min_thickness} mm）より大きくしてください。"
         )
 
-    values = load_brightness(image, width, resolution)
+    adjust = ImageAdjust(brightness, contrast, blur, auto_levels,
+                         crop_left, crop_top, crop_right, crop_bottom)
+    values = load_brightness(image, width, resolution, adjust)
     thickness = max_thickness - values * (max_thickness - min_thickness)
     mesh = heightmap_to_mesh(thickness, width)
     # 完成図（光を当てたときの見え方）を描くときに使う情報
@@ -117,15 +140,23 @@ def top_heights(mesh: trimesh.Trimesh) -> np.ndarray:
     return np.asarray(mesh.vertices[: cols * rows, 2]).reshape(rows, cols)
 
 
-def load_brightness(image: ImageInput, width: float, resolution: float) -> np.ndarray:
+def load_brightness(
+    image: ImageInput,
+    width: float,
+    resolution: float,
+    adjust: "ImageAdjust | None" = None,
+) -> np.ndarray:
     """画像を読み込み、解像度に合わせて縮小した明るさの表（0.0=黒〜1.0=白）を返す。
 
     表の大きさは「幅 / 解像度 + 1」列。画素の中心を頂点として使うため +1 している。
+    adjust を渡すと、切り抜き → 縮小 → ぼかし → 自動補正 → コントラスト → 明るさ の順に調整する。
     """
     _check_positive(width, "幅")
     _check_positive(resolution, "解像度")
+    adjust = adjust or ImageAdjust()
+    adjust.check()
 
-    gray = _to_gray_array(image)
+    gray = _crop(_to_gray_array(image), adjust)
     src_h, src_w = gray.shape
 
     # 点と点の「間隔の数」で縦横比を合わせる（奥行き = 幅 x 縦 / 横 になるように）
@@ -146,7 +177,78 @@ def load_brightness(image: ImageInput, width: float, resolution: float) -> np.nd
     interp = cv2.INTER_AREA if cols < src_w else cv2.INTER_LINEAR
     resized = cv2.resize(gray, (cols, rows), interpolation=interp)
     # float32 のままだと最小厚みが 0.79999995mm のようにわずかに下回るため float64 にする
-    return np.clip(resized.astype(np.float64), 0.0, 1.0)
+    values = np.clip(resized.astype(np.float64), 0.0, 1.0)
+    return _apply_adjust(values, adjust, step=width / (cols - 1))
+
+
+@dataclass(frozen=True)
+class ImageAdjust:
+    """画像の調整（既定値はすべて「調整しない」）。"""
+    brightness: float = 0.0    # 明るさ（%, -100〜100）。足し算で明るく・暗くする
+    contrast: float = 100.0    # コントラスト（%）。100 でそのまま、大きいほど明暗の差が強い
+    blur: float = 0.0          # ぼかしの強さ（mm）。写真のざらつきを減らす
+    auto_levels: bool = False  # 自動補正: 暗い所〜明るい所を、黒〜白いっぱいに広げる
+    crop_left: float = 0.0     # 切り抜き（%）: 左から何 % 切り取るか
+    crop_top: float = 0.0
+    crop_right: float = 0.0
+    crop_bottom: float = 0.0
+
+    def check(self) -> None:
+        """値が正しい範囲にあるか確認する。"""
+        for value, label in ((self.brightness, "明るさ"), (self.contrast, "コントラスト"),
+                             (self.blur, "ぼかし"), (self.crop_left, "切り抜き（左）"),
+                             (self.crop_top, "切り抜き（上）"), (self.crop_right, "切り抜き（右）"),
+                             (self.crop_bottom, "切り抜き（下）")):
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+                raise ImageMeshError(f"{label}が数値ではありません（入力値: {value}）。")
+        if not -100 <= self.brightness <= 100:
+            raise ImageMeshError(f"明るさは -100〜100% にしてください（入力値: {self.brightness:g}）。")
+        if self.contrast < 0:
+            raise ImageMeshError(f"コントラストは 0% 以上にしてください（入力値: {self.contrast:g}）。")
+        if self.blur < 0:
+            raise ImageMeshError(f"ぼかしは 0 以上にしてください（入力値: {self.blur:g}）。")
+        for value, label in ((self.crop_left, "左"), (self.crop_top, "上"),
+                             (self.crop_right, "右"), (self.crop_bottom, "下")):
+            if not 0 <= value < 100:
+                raise ImageMeshError(f"切り抜き（{label}）は 0 以上 100% 未満にしてください（入力値: {value:g}）。")
+        if self.crop_left + self.crop_right >= 100:
+            raise ImageMeshError("切り抜きの左と右の合計が 100% 以上あり、画像が残りません。")
+        if self.crop_top + self.crop_bottom >= 100:
+            raise ImageMeshError("切り抜きの上と下の合計が 100% 以上あり、画像が残りません。")
+
+
+def _crop(gray: np.ndarray, adjust: ImageAdjust) -> np.ndarray:
+    """画像の上下左右を、指定した割合（%）だけ切り取る。"""
+    h, w = gray.shape
+    left = round(w * adjust.crop_left / 100)
+    right = w - round(w * adjust.crop_right / 100)
+    top = round(h * adjust.crop_top / 100)
+    bottom = h - round(h * adjust.crop_bottom / 100)
+    cropped = gray[top:bottom, left:right]
+    if min(cropped.shape) < 2:
+        raise ImageMeshError("切り抜いた後の画像が小さすぎます。切り抜きを減らしてください。")
+    return cropped
+
+
+def _apply_adjust(values: np.ndarray, adjust: ImageAdjust, step: float) -> np.ndarray:
+    """縮小した明るさの表に、ぼかし → 自動補正 → コントラスト → 明るさ の順で調整をかける。
+
+    step: 表の 1 マスの大きさ（mm）。ぼかしの強さ（mm）をマスの数に直すのに使う。
+    """
+    if adjust.blur > 0:
+        sigma = adjust.blur / step  # mm → マスの数
+        values = cv2.GaussianBlur(values, (0, 0), sigmaX=sigma, sigmaY=sigma,
+                                  borderType=cv2.BORDER_REFLECT)
+    if adjust.auto_levels:
+        # ごく一部の極端に暗い・明るい点に引っ張られないよう、上下 1% は無視する
+        lo, hi = np.percentile(values, [1, 99])
+        if hi - lo > 1e-6:
+            values = (values - lo) / (hi - lo)
+    if adjust.contrast != 100:
+        values = (values - 0.5) * (adjust.contrast / 100) + 0.5
+    if adjust.brightness:
+        values = values + adjust.brightness / 100
+    return np.clip(values, 0.0, 1.0)
 
 
 def heightmap_to_mesh(heights: np.ndarray, width: float) -> trimesh.Trimesh:
