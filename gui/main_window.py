@@ -46,6 +46,7 @@ FORMATS = ("STL", "OBJ", "3MF", "AMF")
 # 選択肢（画面の表示 → core に渡す値）
 ALIGN_CHOICES = {"中央": "center", "行頭（左・上）": "left", "行末（右・下）": "right"}
 DIRECTION_CHOICES = {"横書き": "horizontal", "縦書き": "vertical"}
+STYLE_CHOICES = {"浮き出し": "raised", "彫り込み": "engraved"}
 
 # フィラメント見積もり用のインフィルの初期値（%）
 DEFAULT_INFILL = {"text": 15, "nameplate": 15, "relief": 15, "lithophane": 100}
@@ -96,11 +97,12 @@ FIELDS: dict[str, list[Field]] = {
         Field("text", "文字", "山田 太郎", "text"),
         Field("font_path", "フォント", DEFAULT_FONT, "font"),
         Field("direction", "書き方", "横書き", "choice", choices=DIRECTION_CHOICES),
+        Field("style", "文字の形", "浮き出し", "choice", choices=STYLE_CHOICES),
         Field("width", "板の幅", 100.0, "optional"),
         Field("depth", "板の奥行き", 30.0, "optional"),
         Field("size", "文字の大きさ", "", "optional"),
         Field("base_thickness", "台座の厚み", 3.0),
-        Field("text_height", "文字の高さ", 2.0),
+        Field("text_height", "文字の高さ・彫りの深さ", 2.0),
         Field("margin", "余白", 5.0),
         Field("corner_radius", "角の丸み", 0.0),
         Field("line_spacing", "行の間隔", 1.2, unit="倍"),

@@ -34,6 +34,9 @@ CURVE_MAX_SEGMENTS = 32
 
 ALIGNS = ("left", "center", "right")
 DIRECTIONS = ("horizontal", "vertical")
+STYLES = ("raised", "engraved")  # 浮き出し / 彫り込み
+# 彫り込みで、彫った部分の底に残したい厚み（mm）。これより薄いと警告する
+MIN_ENGRAVE_FLOOR = 1.0
 
 # 縦書きで 90° 回す文字（長音・ダッシュ・括弧など）
 VERTICAL_ROTATE = set("ー－―‐～〜…‥（）()「」『』【】〔〕［］[]｛｝{}〈〉《》<>＜＞-~=＝")
@@ -148,8 +151,9 @@ def make_nameplate(
     line_spacing: float = 1.2,
     align: str = "center",
     direction: str = "horizontal",
+    style: str = "raised",
 ) -> trimesh.Trimesh:
-    """台座（板）の上に立体文字を載せたネームプレートを作る。
+    """台座（板）の上に立体文字を載せた（または板に文字を彫り込んだ）ネームプレートを作る。
 
     大きさの決め方:
         - width・depth を指定、size=None
@@ -172,6 +176,8 @@ def make_nameplate(
         line_spacing: 行の間隔（size の何倍か）。
         align: 複数行のときの揃え方。
         direction: "horizontal"（横書き）または "vertical"（縦書き）。
+        style: "raised"（浮き出し: 板の上に文字が出る）または
+               "engraved"（彫り込み: 板に文字を彫る。text_height が彫りの深さになる）。
 
     Returns:
         watertight な trimesh.Trimesh。
@@ -180,6 +186,15 @@ def make_nameplate(
     """
     _check_positive(base_thickness, "台座の厚み")
     _check_positive(text_height, "文字の高さ")
+    if style not in STYLES:
+        raise TextMeshError(
+            f"文字の形の指定が正しくありません（{style}）。raised / engraved のいずれかにしてください。"
+        )
+    if style == "engraved" and text_height >= base_thickness:
+        raise TextMeshError(
+            f"彫りの深さ（{text_height:g} mm）が台座の厚み（{base_thickness:g} mm）以上あり、"
+            "板を突き抜けてしまいます。彫りを浅くするか、台座を厚くしてください。"
+        )
     _check_non_negative(margin, "余白")
     _check_non_negative(corner_radius, "角の丸み")
     if width is not None:
@@ -221,17 +236,32 @@ def make_nameplate(
     # --- 立体を組み立てる ---
     plate = _rounded_rectangle(plate_w, plate_d, corner_radius).extrude(base_thickness)
 
-    # 文字を板の中央へ移動し、台座の上面に載せる
+    # 文字を板の中央へ移動する
     dx = plate_w / 2 - (tx0 + tx1) / 2
     dy = plate_d / 2 - (ty0 + ty1) / 2
-    letters = (
-        section.translate((dx, dy))
-        .extrude(text_height)
-        .translate((0, 0, base_thickness))
-    )
+    centered = section.translate((dx, dy))
 
-    mesh = place_on_origin(manifold_to_trimesh(plate + letters))
+    warnings = []
+    if style == "raised":
+        # 浮き出し: 台座の上面に文字を載せる
+        letters = centered.extrude(text_height).translate((0, 0, base_thickness))
+        solid = plate + letters
+    else:
+        # 彫り込み: 上面から text_height の深さまで文字の形を削る
+        # （削る形は上に 1mm はみ出させて、上面にうすい膜が残らないようにする）
+        cutter = centered.extrude(text_height + 1.0).translate((0, 0, base_thickness - text_height))
+        solid = plate - cutter
+        floor = base_thickness - text_height
+        if floor < MIN_ENGRAVE_FLOOR:
+            warnings.append(
+                f"彫った部分の底の厚みが {floor:.1f} mm しかなく、割れたり透けたりしやすくなります。"
+                f"{MIN_ENGRAVE_FLOOR:g} mm 以上残すのがおすすめです。"
+            )
+
+    mesh = place_on_origin(manifold_to_trimesh(solid))
     mesh.metadata["kind"] = "nameplate"
+    mesh.metadata["text_style"] = style
+    mesh.metadata["warnings"] = warnings
     mesh.metadata["base_thickness"] = float(base_thickness)  # 穴が文字にかかるかの判定に使う
     mesh.metadata["thin_ratio"] = thin_ratio(section)
     mesh.metadata["text_size"] = float(size)
